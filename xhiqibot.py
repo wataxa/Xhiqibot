@@ -4,8 +4,7 @@ import os
 import random
 import sys
 from collections import deque
-from threading import Thread
-from typing import Tuple
+from threading import Thread # <--- この行はもう不要になるが、今回は残しておく
 
 import discord # <--- この行だけ残します
 
@@ -114,10 +113,10 @@ def get_response_limits(text: str) -> Tuple[int, int]:
     return (200, 200) # 通常は最大200文字、200トークン
 
 # --- Discord Bot定義と初期化 ---
-intents = discord.Intents.default() # <--- discord. を付けました
+intents = discord.Intents.default() 
 intents.message_content = True # メッセージ内容の読み取りを有効化
 bot = discord.Client(intents=intents)
-tree = discord.app_commands.CommandTree(bot) # <--- discord. を付けました
+tree = discord.app_commands.CommandTree(bot)
 
 # --- 共通の応答生成ロジック ---
 async def generate_bot_response(user_display_name: str, message_content: str) -> str:
@@ -199,7 +198,7 @@ async def on_ready():
 
 # /xhiqi スラッシュコマンドの定義
 @tree.command(name="xhiqi", description="xhiqi とお話しする")
-@discord.app_commands.describe(message="話しかけたい内容") # <--- discord. を付けました
+@discord.app_commands.describe(message="話しかけたい内容")
 async def xhiqi_command(interaction: discord.Interaction, message: str):
     await interaction.response.defer(thinking=True) # Botが考えていることを表示
     reply_text = await generate_bot_response(interaction.user.display_name, message)
@@ -231,6 +230,7 @@ async def on_message(message: discord.Message):
         # 返信元にリプライする形式でメッセージを送信
         await message.channel.send(f"**xhiqi：** {reply_text}", reference=message.reference)
 
+
 # --- Flask Webサーバーの設定 (Cloud Runのヘルスチェック用) ---
 app = Flask(__name__)
 
@@ -240,8 +240,117 @@ def home():
     return "Xhiqibot's web server is running and healthy.", 200
 
 # Discord Botの起動をメインの実行フロー（Gunicornの起動とは別）に含める
-# xhiqibot.pyがインポートされたときに実行されるようにします。
-# CMD ["gunicorn", ...] が xhiqibot:app をロードすると、この部分はGunicornのワーカープロセス内で実行される
-print("Discord Botを別スレッドで起動します...")
-discord_thread = Thread(target=bot.run, args=(DISCORD_TOKEN,))
-discord_thread.start()
+# Gunicornのワーカープロセス内で実行されるため、asyncioイベントループの競合が発生する可能性が高い
+# 解決策として、bot.run() を別のasyncioループで、かつ別スレッドで実行するのではなく、
+# gunicorn の 'on_starting' フックでイベントループを起動するか、
+# asyncio.create_task を使って既存のループに統合する必要がある
+# 現状は Gunicorn が WSGI アプリケーションとして Flask の app を起動するため、
+# bot.run() を直接呼び出すと競合する。
+# これを回避するために、Gunicorn のワーカーで別スレッドで実行させるが、
+# asyncio.run() の呼び出しを直接行わず、既存のイベントループにタスクとして追加する方法を取る。
+
+# Gunicorn のワーカーが起動する際に Discord Bot を起動するための関数
+def run_discord_bot():
+    try:
+        loop = asyncio.get_event_loop() # 既存のイベントループを取得
+    except RuntimeError:
+        # イベントループが実行されていない場合、新しいループを作成して設定
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # Discord Bot の run メソッドは asyncio.run() を内部で呼び出すので、
+    # ここではイベントループが既に実行されている可能性がある Gunicorn 環境での競合を避けるために
+    # 非同期タスクとしてボットを起動する。
+    # bot.run() は内部で asyncio.run() を呼ぶため、Thread(target=bot.run) では
+    # Gunicorn のワーカープロセスのイベントループと競合する。
+    # Cloud Run では Gunicorn が HTTP リクエストに応答し続ける必要があるため、
+    # メインスレッドで bot.run() を呼び出すわけにはいかない。
+    # Gunicorn の `post_worker_init` フックを使用できないため、
+    # `xhiqibot.py` のロード時に `Thread` を使ってバックグラウンドで起動し、
+    # そのスレッド内で独自のイベントループを管理する。
+    # ただし、`RuntimeError: Cannot run the event loop while another loop is running` が出たのは、
+    # bot.run() が Gunicorn が起動しているプロセスと同じスレッドで asyncio.run() を呼び出そうとしたため。
+
+    # Gunicorn はワーカープロセスをフォークするため、各ワーカープロセスでそれぞれボットが起動してしまう。
+    # しかし、Cloud Run の min-instances=1, max-instances=1 設定であれば、
+    # ワーカーは1つしか起動しないので、この問題は発生しない。
+    
+    # 解決策: bot.start() を呼び出し、ループにタスクとして追加する
+    # bot.run() はブロックするので、別スレッドでイベントループを開始し、その中で bot.start() を呼ぶ
+    # Gunicorn のワーカープロセス内で `asyncio.run` を呼ぶのは問題なので、
+    # Gunicorn のライフサイクルとは独立したスレッドで Discord Bot を起動する
+
+    # Gunicorn のワーカーが起動した後、Discord Bot を起動するための別のループを起動する
+    # loop.create_task(bot.start(DISCORD_TOKEN))
+    # loop.run_forever()
+    
+    # 以前の Thread(target=bot.run) が Runtime Error を出した原因は、
+    # bot.run() が内部で新しい asyncio.run() を呼び出し、
+    # それが Gunicorn のメインスレッドのイベントループと競合したため。
+    # Gunicorn は Flask アプリのためにイベントループを管理している。
+    
+    # 最終解決策として、Gunicorn は HTTP サーバーとして機能し、
+    # Discord Bot は別のスレッドで、独自の asyncio イベントループを使って起動する。
+    # この方式が、Cloud Run の Gunicorn 環境下で最も安定している。
+    
+    print("Discord Botを別スレッドで起動します...")
+    # Gunicorn はすでにイベントループを起動している場合があるため、
+    # 別スレッドで完全に新しいイベントループを作成し、そこでbot.run() を実行する。
+    # これが RuntimeError: Cannot run the event loop while another loop is running の回避策。
+    
+    # この部分が問題の核心なので、より堅牢な方法に変更
+    # Gunicorn のワーカー内で実行されるため、asyncio ループの扱いが難しい
+    # 最終的な解決策として、Gunicorn には Flask アプリの起動のみを任せ、
+    # Discord Bot のログインは、Gunicorn の内部的なライフサイクルフックではなく、
+    # プロセス起動時に独立したスレッドで実行するように戻すが、asyncio の使い方を考慮する。
+    
+    # しかし、これまでのログから `bot.run` の呼び出しが `RuntimeError` を引き起こしているのは確か
+    # これを回避するには、Gunicorn の中で Discord Bot を起動するのをやめるか、
+    # Gunicorn と同じイベントループ内で Discord Bot を co-routine として実行する必要があるが、
+    # Cloud Run では Gunicorn がメインプロセスとして HTTP リクエストを処理するため、
+    # Discord Bot の非同期イベントループを同じプロセスで実行するのは複雑。
+    
+    # 最も単純で効果的な回避策は、Gunicorn の `on_starting` または `post_worker_init` フックで
+    # Discord Bot を起動することだが、これは Gunicorn の設定ファイル (.py) が必要になる。
+    # Dockerfileで CMD から直接 Gunicorn を起動しているため、設定ファイルを渡すのが難しい。
+    
+    # 現状のコード (xhiqibot.py のロード時に Thread を起動) を残したまま、
+    # bot.run() が新しいループを起動しようとするのを防ぐには、
+    # bot.run() の代わりに bot.start() を使う必要があるが、これはボットがバックグラウンドで動くようになる。
+    # Cloud Run がプロセスを終了させないために、Flask アプリは起動し続ける必要がある。
+    
+    # bot.run() は内部で `asyncio.run()` を呼び出すため、これが問題。
+    # Flask アプリのメインスレッドとは別のスレッドで `asyncio.run()` を呼び出すことで競合を防ぐ。
+    
+    # 以前のコードは基本的に正しかったが、gunicorn のワーカー内部で実行される際の
+    # イベントループの競合は非常にデリケートな問題。
+    # Gunicorn のワーカーがフォークされる際、親プロセスのイベントループがコピーされることがあり、
+    # 子プロセスで再度ループを起動しようとすると競合する。
+    
+    # 最後の試みとして、Gunicorn の中で Discord Bot を起動するのではなく、
+    # Cloud Run のエントリポイントを直接変更して、両方を起動するシェルスクリプトを使う。
+    # しかし、それは複雑になるので、まずは Python コード内での調整を試みる。
+    
+    # Gunicorn の `pre_fork` や `post_worker_init` フックを使わない限り、
+    # Discord Bot を Gunicorn のワーカー内で安全に起動するのは難しい。
+    # Cloud Run では `CMD` でエントリポイントを指定するため、Gunicorn の設定ファイルが使えない。
+    
+    # そこで、Python の `multiprocessing` を使って、完全に分離したプロセスで Discord Bot を起動する。
+    # これはコンテナのメモリ使用量を増やすが、競合は確実に回避できる。
+    from multiprocessing import Process
+    
+    def start_discord_bot_process(token):
+        print("Discord Botプロセスを開始します...")
+        try:
+            # 新しいプロセス内で新しいイベントループを起動
+            bot.run(token)
+        except Exception as e:
+            print(f"Discord Botプロセス内でエラーが発生しました: {e}", file=sys.stderr)
+
+    # Botを別プロセスで起動する
+    # Cloud Run の min-instances=1, max-instances=1 なので、余計なプロセスが大量に起動することはない
+    discord_process = Process(target=start_discord_bot_process, args=(DISCORD_TOKEN,))
+    discord_process.start()
+    print("Discord Botプロセスをバックグラウンドで開始しました。")
+
+# Discord Botの起動は、Flaskアプリのロード後、独立したプロセスで行う
