@@ -4,14 +4,10 @@ FROM python:3.10-slim-buster
 # コンテナ内の作業ディレクトリを設定
 WORKDIR /app
 
-# requirements.txt をコピー
-COPY requirements.txt .
-
-# python-dotenv を最初に強制的にインストール (キャッシュを無効化)
-RUN pip install --no-cache-dir python-dotenv
-
-# その後、requirements.txt の残りの依存関係をインストール
-RUN pip install --no-cache-dir -r requirements.txt
+# 必要なライブラリを直接インストール
+# --no-cache-dir はキャッシュを使わないことで、ビルド失敗時の再試行をクリーンにする
+# gunicorn と discord.py は互いに依存関係が複雑な場合があるので、先にインストール
+RUN pip install --no-cache-dir gunicorn discord.py==2.4.0 openai python-dotenv Flask httpx
 
 # アプリケーションのコードをコピー
 COPY . .
