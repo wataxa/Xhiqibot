@@ -4,5 +4,5 @@ steps:
 images:
 - 'gcr.io/$PROJECT_ID/xhiqibot-image'
 options:
-  diskSizeGb: '200' # ディスクサイズは前回増やしたのでこのままでOK
-  machineType: 'n1-highmem-8' # <-- この行を追加！高メモリマシンタイプを指定
+  diskSizeGb: '200'         # ディスク容量を増加
+  machineType: 'n1-highmem-8' # 高メモリマシンタイプを使用
