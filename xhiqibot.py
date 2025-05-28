@@ -46,7 +46,7 @@ except ImportError:
     # v0.x 系のフォールバック (もし存在すれば)
     import openai # type: ignore
     openai.api_key = OPENAI_API_KEY
-    openai.project = OPENAI_PROJECT_ID # v0.xでのproject指定はサポートされていない可能性あり
+    # openai.project = OPENAI_PROJECT_ID # v0.xでのproject指定はサポートされていない可能性あり
     OpenAIError = openai.error.OpenAIError # type: ignore
 
     async def complete(model: str, messages: list, max_tokens: int) -> str:
@@ -217,9 +217,8 @@ if __name__ == "__main__":
     # Cloud Runは環境変数PORTを設定するので、それを取得して使用
     port = int(os.environ.get("PORT", 8080))
     print(f"Starting Flask web server with Gunicorn on port {port}...")
-    # 'main:app' は、このファイル名が 'main.py' であり、Flaskアプリのインスタンス名が 'app' であることを想定
-    # このスクリプトの名前が 'main.py' 以外の場合は、適宜変更してください (例: 'your_file_name:app')
-    os.system(f"gunicorn --bind 0.0.0.0:{port} --workers 1 main:app")
+    # ファイル名が 'xhiqi.py' なので、'xhiqi:app' と指定
+    os.system(f"gunicorn --bind 0.0.0.0:{port} --workers 1 xhiqi:app")
 
     # 注意: os.system はブロックするため、ここより下のコードは実行されません。
     # 実際には、GunicornがFlaskサーバーのプロセスを管理し、このプロセスはCloud Runのコンテナ内で実行され続けます。
