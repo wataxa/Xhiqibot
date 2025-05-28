@@ -6,6 +6,8 @@ from typing import Tuple
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
+from flask import Flask
+from threading import Thread
 
 # --- .env 読み込み ---
 load_dotenv()
@@ -58,19 +60,16 @@ except (ImportError, AttributeError):
 # --- 会話履歴保持 ---
 history = deque(maxlen=20)
 
-
 def get_limits(text: str) -> Tuple[int, int]:
     if "レイシオ" in text:
         return (2000, 1500)
     return (200, 200)
-
 
 # --- Bot定義と初期化 ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
-
 
 # --- 共通の応答生成 ---
 async def respond_to(user: discord.abc.User, message: str) -> str:
@@ -115,7 +114,6 @@ async def respond_to(user: discord.abc.User, message: str) -> str:
 
     return reply
 
-
 # --- /xhiqi コマンド ---
 @tree.command(name="xhiqi", description="xhiqi とお話しする")
 @app_commands.describe(message="話しかけたい内容")
@@ -124,7 +122,6 @@ async def xhiqi(interaction: discord.Interaction, message: str):
     reply = await respond_to(interaction.user, message)
     await interaction.followup.send(
         f"**{interaction.user.display_name}：** {message}\n**xhiqi：** {reply}")
-
 
 # --- メンション応答 ---
 @bot.event
@@ -141,7 +138,6 @@ async def on_message(msg: discord.Message):
         reply = await respond_to(msg.author, message_text)
         await msg.channel.send(f"**xhiqi：** {reply}")
 
-
 # --- 起動と同期 ---
 @bot.event
 async def on_ready():
@@ -157,20 +153,18 @@ async def on_ready():
     except Exception as e:
         print("Sync error:", e)
 
-
-# --- FlaskでWebサーバを起動して維持する（Cloud Run向け） ---
-from flask import Flask
-
+# --- Flask 起動 ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Xhiqibot is running.", 200
 
-if __name__ == "__main__":
+def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# --- Botの起動 ---
-bot.run(DISCORD_TOKEN)
-
+# --- 実行 ---
+if __name__ == "__main__":
+    Thread(target=run_flask).start()
+    bot.run(DISCORD_TOKEN)
