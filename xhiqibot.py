@@ -1,66 +1,53 @@
 from __future__ import annotations
-import asyncio, os, textwrap, random
+import asyncio
+import os
+import random
+import sys
 from collections import deque
+from threading import Thread
 from typing import Tuple
 
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
-from flask import Flask # Flaskはそのまま残しておく
-from threading import Thread # これは使わない
-
-# Flaskのサーバーを別のスレッドで動かすのではなく、非同期で統合するために
-# aiohttp の Webサーバーを使うか、flask_asyncioのようなライブラリを使う
-# もしくは、簡易的な非同期HTTPサーバーを自分で立てるのが一般的です。
-# 今回は、一番簡単な方法でCloud Runのヘルスチェックに応答するように修正します。
-
-# Flaskはヘルスチェック用として非常にシンプルにする
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Xhiqibot is running.", 200
-
-# Flaskを別スレッドで実行する関数
-def run_flask_thread():
-    port = int(os.environ.get("PORT", 8080))
-    # Flaskのデフォルトはシングルスレッドなので、開発用サーバーとしては問題ない
-    # 本番環境ではgunicornなどを使うのが一般的だが、ヘルスチェック目的ならこれでOK
-    app.run(host="0.0.0.0", port=port)
+from flask import Flask
 
 # --- .env 読み込み ---
 load_dotenv()
+
+# 必須環境変数のチェック
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID") or None
-GUILD_ID_RAW = os.getenv("GUILD_ID")
-
 if not DISCORD_TOKEN or not OPENAI_API_KEY:
-    raise RuntimeError(".env に DISCORD_TOKEN と OPENAI_API_KEY を設定してください")
+    print("エラー: DISCORD_TOKEN および OPENAI_API_KEY を .env ファイルに設定してください。", file=sys.stderr)
+    sys.exit(1) # プログラムを終了させる
 
-# --- モデル指定 ---
-PRIMARY_MODEL = "gpt-4o-mini"
-FALLBACK_MODEL = "gpt-3.5-turbo"
+OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID") or None
+GUILD_ID_RAW = os.getenv("GUILD_ID") # 特定のギルドに同期する場合
 
-# --- OpenAI SDK 自動判定 ---
+# --- OpenAI SDK 初期化 ---
 try:
-    import openai
     from openai import OpenAI
-    _client = OpenAI(api_key=OPENAI_API_KEY, project=OPENAI_PROJECT_ID)
-    OpenAIError = openai.OpenAIError
+    # SDK v1.x の書き方
+    openai_client = OpenAI(api_key=OPENAI_API_KEY, project=OPENAI_PROJECT_ID)
+    OpenAIError = Exception # v1.xではopenai.OpenAIErrorが基底クラスではないので汎用的なExceptionに
+                            # より厳密には openai.APIStatusError などを使う
 
     async def complete(model: str, messages: list, max_tokens: int) -> str:
-        resp = _client.chat.completions.create(
+        resp = await asyncio.to_thread(
+            openai_client.chat.completions.create, # 同期メソッドを非同期で実行
             model=model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=0.7,
         )
         return resp.choices[0].message.content.strip()
-except (ImportError, AttributeError):
-    import openai  # type: ignore
+except ImportError:
+    # v0.x 系のフォールバック (もし存在すれば)
+    import openai # type: ignore
     openai.api_key = OPENAI_API_KEY
-    OpenAIError = openai.error.OpenAIError  # type: ignore
+    openai.project = OPENAI_PROJECT_ID # v0.xでのproject指定はサポートされていない可能性あり
+    OpenAIError = openai.error.OpenAIError # type: ignore
 
     async def complete(model: str, messages: list, max_tokens: int) -> str:
         loop = asyncio.get_running_loop()
@@ -74,162 +61,165 @@ except (ImportError, AttributeError):
             ),
         )
         return resp["choices"][0]["message"]["content"].strip()
+print(f"[OpenAI SDK] {('v1.x' if 'openai_client' in locals() else 'v0.x')} detected")
 
+
+# --- モデル指定 ---
+PRIMARY_MODEL = "gpt-4o-mini"
+FALLBACK_MODEL = "gpt-3.5-turbo"
 
 # --- 会話履歴保持 ---
+# messagesのロールは "user", "assistant", "system"
+# 名前は "name" フィールドで指定 (role="user"のみ)
 history = deque(maxlen=20)
 
 def get_limits(text: str) -> Tuple[int, int]:
+    """メッセージ内容に応じて返答の文字数と最大トークン数を設定"""
     if "レイシオ" in text:
-        return (2000, 1500)
-    return (200, 200)
+        return (2000, 1500) # レイシオの場合、最大2000文字、1500トークン
+    return (200, 200) # 通常は最大200文字、200トークン
 
 # --- Bot定義と初期化 ---
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True # メッセージの内容を読み取るためのインテント
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
-# --- 共通の応答生成 ---
-async def respond_to(user: discord.abc.User, message: str) -> str:
-    is_ratio = "レイシオ" in message
-    char_limit, max_tokens = get_limits(message)
+# --- 共通の応答生成関数 ---
+async def generate_response(user_display_name: str, message_content: str) -> str:
+    """
+    OpenAI APIを呼び出して応答を生成する
+    """
+    char_limit, max_tokens = get_limits(message_content)
 
-    system_prompt = ("あなたの名前はしき（xhiqi）。落ち着いて丁寧に話し、" +
-                     ("簡潔に200字以内で" if not is_ratio else "できる限り詳細に") +
-                     "日本語で答えてください。")
+    system_prompt = (
+        "あなたの名前はしき（xhiqi）。"
+        "粛やかで丁寧な口調で応答してください。"
+        f"{char_limit}文字以内で簡潔に日本語で答えてください。"
+        "ただし「レイシオ」という単語が含まれる場合は、できる限り詳細に答えてください。"
+    )
 
+    # ユーザーのメッセージを履歴に追加
     history.append({
         "role": "user",
-        "name": user.display_name,
-        "content": message
+        "name": user_display_name,
+        "content": message_content
     })
-    messages = [{"role": "system", "content": system_prompt}] + list(history)
+    
+    # APIに送るメッセージリストを構築 (システムプロンプト + 履歴)
+    messages_for_api = [{"role": "system", "content": system_prompt}] + list(history)
 
     try:
-        reply = await complete(PRIMARY_MODEL, messages, max_tokens)
-    except OpenAIError as e: # エラーハンドリングを強化
-        print(f"Primary model error: {e}")
+        # プライマリモデルで応答を試行
+        reply = await complete(PRIMARY_MODEL, messages_for_api, max_tokens)
+    except OpenAIError as e:
+        print(f"Primary model ({PRIMARY_MODEL}) error: {e}", file=sys.stderr)
         try:
-            reply = await complete(FALLBACK_MODEL, messages, max_tokens)
-            print("Successfully used fallback model.")
+            # プライマリモデルが失敗した場合、フォールバックモデルを試行
+            reply = await complete(FALLBACK_MODEL, messages_for_api, max_tokens)
+            print(f"Successfully used fallback model ({FALLBACK_MODEL}).")
         except OpenAIError as e_fallback:
-            print(f"Fallback model error: {e_fallback}")
-            return "APIエラーが発生しました。しばらくしてからもう一度お試しください。（両モデルでエラー）"
+            print(f"Fallback model ({FALLBACK_MODEL}) error: {e_fallback}", file=sys.stderr)
+            return "APIエラーが発生しました。しばらくしてからもう一度お試しください。"
 
-
-    reply = textwrap.fill(reply, width=60)
+    # AIの返答を履歴に追加
     history.append({"role": "assistant", "content": reply})
 
-    if not is_ratio and random.random() < 0.15:
+    # 低確率でカニに関する思考を追加
+    if "レイシオ" not in message_content and random.random() < 0.15:
         try:
-            crab = await complete(
-                PRIMARY_MODEL,
+            crab_thought = await complete(
+                PRIMARY_MODEL, # カニ思考もメインモデルで
                 [
-                    {
-                        "role": "system",
-                        "content": "あなたは時々カニを想います。100字以内で書いてください。"
-                    },
-                    {
-                        "role": "user",
-                        "content": "今、何を考えていますか？"
-                    },
+                    {"role": "system", "content": "あなたは時々カニを想います。100字以内で書いてください。"},
+                    {"role": "user", "content": "今、何を考えていますか？"},
                 ],
                 max_tokens=100,
             )
-            reply += f"\n\n（ところで、{crab.strip()}）"
+            reply += f"\n\n（ところで、{crab_thought.strip()}）"
         except OpenAIError as e_crab:
-            print(f"Crab thought error: {e_crab}")
-            # カニの思考部分でエラーが出てもメインの返信は続ける
+            print(f"Crab thought generation error: {e_crab}", file=sys.stderr)
+            # カニの思考でエラーが出ても、メインの返信はそのまま続行
 
     return reply
 
-# --- /xhiqi コマンド ---
+# --- Discord Botイベントとコマンド ---
+
+# Botがオンラインになった時の処理
+@bot.event
+async def on_ready():
+    print(f"XhiqiBot starting… Logged in as {bot.user} (ID: {bot.user.id})")
+    try:
+        if GUILD_ID_RAW:
+            # 特定のギルドにスラッシュコマンドを同期
+            guild = discord.Object(id=int(GUILD_ID_RAW))
+            synced = await tree.sync(guild=guild)
+            print(f"Slash コマンドをギルドに同期しました ({len(synced)} commands)")
+        else:
+            # 全てのギルドにスラッシュコマンドを同期 (最大1時間かかる場合あり)
+            synced = await tree.sync()
+            print(f"Slash コマンドを全体に同期しました ({len(synced)} commands, 最大 1h)")
+    except Exception as e:
+        print(f"Sync error: {e}", file=sys.stderr)
+
+# /xhiqi スラッシュコマンド
 @tree.command(name="xhiqi", description="xhiqi とお話しする")
 @app_commands.describe(message="話しかけたい内容")
 async def xhiqi(interaction: discord.Interaction, message: str):
-    await interaction.response.defer(thinking=True)
-    reply = await respond_to(interaction.user, message)
+    await interaction.response.defer(thinking=True) # Botが考えていることを表示
+    reply = await generate_response(interaction.user.display_name, message)
     await interaction.followup.send(
         f"**{interaction.user.display_name}：** {message}\n**xhiqi：** {reply}")
 
-# --- メンション応答 ---
+# メンションに対する応答
 @bot.event
 async def on_message(msg: discord.Message):
-    if msg.author.bot:
+    if msg.author.bot: # Bot自身のメッセージは無視
         return
 
-    if bot.user and bot.user.mentioned_in(msg): # bot.userがNoneではないことを確認
-        # メンション部分を削除してメッセージテキストを取得
-        message_text = msg.content.replace(f'<@!{bot.user.id}>', '').strip()
-        if not message_text and msg.reference and isinstance(msg.reference.resolved, discord.Message):
-             message_text = msg.reference.resolved.content # 返信メッセージを優先
-
-        if not message_text: # メッセージが空になったら処理しない
+    # Botへのメンションが含まれているか確認
+    if bot.user and bot.user.mentioned_in(msg):
+        # メンション部分をメッセージから削除して、純粋なメッセージ内容を取得
+        # `@BotName メッセージ` => `メッセージ`
+        # 返信 (Reply) の場合は、返信元のメッセージを取得
+        message_content = msg.content.replace(f'<@!{bot.user.id}>', '').strip()
+        if msg.reference and isinstance(msg.reference.resolved, discord.Message):
+            # 返信の場合は、返信元のメッセージ内容を優先
+            message_content = msg.reference.resolved.content
+        
+        if not message_content: # メッセージ内容が空なら処理しない
             return
 
-        # `is_typing` と `sleep` で入力中表示と処理遅延
-        async with msg.channel.typing():
-            reply = await respond_to(msg.author, message_text)
-        await msg.channel.send(f"**xhiqi：** {reply}", reference=msg.reference) # 返信元にリプライする
+        async with msg.channel.typing(): # Botが入力中...と表示
+            reply = await generate_response(msg.author.display_name, message_content)
+        
+        # 返信元にリプライする形式でメッセージを送信
+        await msg.channel.send(f"**xhiqi：** {reply}", reference=msg.reference)
 
-# --- 起動と同期 ---
-@bot.event
-async def on_ready():
-    print("XhiqiBot starting …")
-    try:
-        if GUILD_ID_RAW:
-            guild = discord.Object(id=int(GUILD_ID_RAW))
-            synced = await tree.sync(guild=guild)
-            print(f"Slash コマンドをギルドへ同期しました ({len(synced)} commands)")
-        else:
-            synced = await tree.sync()
-            print(f"Slash コマンドを全体へ同期しました ({len(synced)} commands, 最大 1h)")
-    except Exception as e:
-        print("Sync error:", e)
+# --- Flask Webサーバーの設定 (Cloud Runのヘルスチェック用) ---
+app = Flask(__name__)
 
-    # Botが起動した後、Flaskサーバーを別のスレッドで起動
-    # bot.loop.run_in_executor を使うと、よりasyncioフレンドリー
-    # しかし、Cloud RunはメインプロセスがHTTPリッスンすることを期待するので、
-    # 実際にはこれが最も簡単な方法ではない。
-    # Cloud Run向けには、Webサーバー(Flask)をメインプロセスにして、
-    # Discord Botの処理を別の方法で動かすか、
-    # またはFlask+discord.pyのイベントループを統合するライブラリを使うのが一般的。
-    # ここでは、最も単純なヘルスチェック応答のためにThreadを使用する。
-    print("Starting Flask in a separate thread...")
-    # Cloud Runの環境変数PORTを確実に使う
-    Thread(target=run_flask_thread).start()
+@app.route('/')
+def home():
+    """Cloud Runのヘルスチェックに応答するエンドポイント"""
+    return "Xhiqibot's web server is running.", 200
 
-
-# --- 実行 ---
+# --- メイン実行ブロック ---
 if __name__ == "__main__":
-    # Bot起動前にFlaskを起動するスレッドを開始するように変更 (ただし、この場所は非同期イベントループの前にする必要がある)
-    # Cloud RunはメインプロセスがHTTPを listen することを期待しているため、この構造だと問題が起きやすい
-    # 解決策として、Discord Botのライブラリに依存しない簡単なWebサーバーを立てるのが一番手っ取り早い
+    # Discord Botを別スレッドで起動
+    # Cloud RunがメインプロセスにHTTPポートのリッスンを期待するため、
+    # Flaskサーバーをメインプロセスで起動し、Botはサブスレッドで動かす。
+    print("Starting Discord Bot in a separate thread...")
+    discord_thread = Thread(target=bot.run, args=(DISCORD_TOKEN,))
+    discord_thread.start()
 
-    # 以下は、Discord Botをメインループで動かしつつ、
-    # ヘルスチェック用のWebサーバーも動かすための一般的な手法です。
-    # gunicornなどのASGI/WSGIサーバーを使ってFlaskを動かすのが一般的ですが、
-    # 最もシンプルな形として、Webサーバーを別スレッドで立ち上げます。
-    # ただし、Cloud Runはメインプロセスがリッスンすることを期待するため、
-    # Discord BotとFlaskを同じプロセスで動かすには少し工夫が必要です。
-
-    # ここでは、Flaskをメインプロセスにして、Discord Botを別スレッドで動かすという逆転の発想で対応します。
-    # 理由は、Cloud RunがHTTPポートのリッスンをメインプロセスに要求するため。
-
-    # Flaskアプリがメインとなる
-    # ここは変更せず、run_flask_thread()をon_ready()で呼ぶのはやめる
-    # Cloud RunがPORTでリッスンすることを期待しているのはメインプロセス
-    # したがって、Discord Botではなく、Flaskをメインプロセスとして実行する
-
-    # ----- 変更点 -----
-    # 1. on_ready() から Flask 起動のコードを削除
-    # 2. if __name__ == "__main__": の中で Flask を直接起動する
-    # 3. Discord Bot を新しいスレッドで起動する
-
-    print("Running Flask as main process to listen on PORT...")
-    Thread(target=bot.run, args=(DISCORD_TOKEN,)).start() # Botを別スレッドで実行
-
-    # Flaskをメインプロセスで実行し、Cloud Runが期待するポートでリッスンさせる
+    # FlaskアプリをGunicornで実行
+    # Cloud Runは環境変数PORTを設定するので、それを取得して使用
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False) # debug=False for production
+    print(f"Starting Flask web server with Gunicorn on port {port}...")
+    # 'main:app' は、このファイル名が 'main.py' であり、Flaskアプリのインスタンス名が 'app' であることを想定
+    # このスクリプトの名前が 'main.py' 以外の場合は、適宜変更してください (例: 'your_file_name:app')
+    os.system(f"gunicorn --bind 0.0.0.0:{port} --workers 1 main:app")
+
+    # 注意: os.system はブロックするため、ここより下のコードは実行されません。
+    # 実際には、GunicornがFlaskサーバーのプロセスを管理し、このプロセスはCloud Runのコンテナ内で実行され続けます。
