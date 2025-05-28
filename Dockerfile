@@ -15,9 +15,14 @@ RUN pip install --no-cache-dir \
 # アプリケーションのコードをコンテナにコピー
 COPY . .
 
-# ここにデバッグ用のコマンドを追加
-# ビルドプロセス中に /app ディレクトリのファイルリストを出力します。
-RUN echo "--- Listing /app contents ---"
+# ここに、もし os.py があれば強制的に削除するコマンドを追加します。
+# -L os.py はシンボリックリンクであるか、-f os.py は通常のファイルであるかを確認し、
+# どちらかであれば削除を実行します。
+# これにより、見えない os.py の問題を回避します。
+RUN if [ -L os.py ] || [ -f os.py ]; then echo "Deleting os.py found in /app..."; rm -f os.py; else echo "os.py not found in /app, skipping deletion."; fi
+
+# デバッグ用のファイルリストコマンドは残しておきます（削除後にどうなったかを確認するため）
+RUN echo "--- Listing /app contents AFTER DELETION ATTEMPT ---"
 RUN ls -lR /app
 RUN echo "--- End of /app contents ---"
 
@@ -25,6 +30,4 @@ RUN echo "--- End of /app contents ---"
 ENV PORT 8080
 
 # Gunicornを使ってFlaskアプリとDiscord Botを起動
-# gunicorn は xhiqibot.py 内の `app` オブジェクトをWSGIアプリケーションとして起動する
-# その後、xhiqibot.py の中で Discord Bot を別プロセスで起動する
 CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 xhiqibot:app
