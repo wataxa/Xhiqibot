@@ -11,6 +11,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 from flask import Flask
+from openai import APIError # <-- この行をここに追加し、OpenAIエラーの基底クラスをインポート
 
 # --- .env 読み込みと必須環境変数チェック ---
 load_dotenv()
@@ -27,7 +28,7 @@ if not DISCORD_TOKEN or not OPENAI_API_KEY:
 # --- OpenAI SDK 初期化とAPI呼び出し関数 ---
 try:
     # OpenAI SDK v1.x の場合
-    from openai import OpenAI, APIError # APIErrorをインポート
+    from openai import OpenAI
     openai_client = OpenAI(api_key=OPENAI_API_KEY, project=OPENAI_PROJECT_ID)
     OpenAIException = APIError # エラーハンドリング用の基底クラスとしてAPIErrorを使用
 
@@ -47,7 +48,7 @@ except ImportError:
     # 古い OpenAI SDK v0.x の場合 (フォールバック)
     import openai # type: ignore
     openai.api_key = OPENAI_API_KEY
-    # openai.project = OPENAI_PROJECT_ID # v0.xではproject指定はサポートされていない可能性あり
+    # openai.project = OPENAI_PROJECT_ID # v0.xでのproject指定はサポートされていない可能性あり
     OpenAIException = openai.error.OpenAIError # type: ignore
 
     async def complete_openai_call(model: str, messages: list, max_tokens: int) -> str:
