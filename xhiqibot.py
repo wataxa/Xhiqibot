@@ -158,27 +158,7 @@ async def on_ready():
         print("Sync error:", e)
 
 
-bot.run(DISCORD_TOKEN)
-
-# --- FlaskでWebサーバを起動して維持する ---
-from flask import Flask
-from threading import Thread
-
-app = Flask('')
-
-
-@app.route('/')
-def home():
-    return "I'm alive!", 200
-
-
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
-
-
-Thread(target=run_flask).start()
-
-# --- Flask WebサーバでCloud Run用のエンドポイントを公開 ---
+# --- FlaskでWebサーバを起動して維持する（Cloud Run向け） ---
 from flask import Flask
 
 app = Flask(__name__)
@@ -188,7 +168,9 @@ def home():
     return "Xhiqibot is running.", 200
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
+# --- Botの起動 ---
+bot.run(DISCORD_TOKEN)
 
