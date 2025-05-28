@@ -7,8 +7,7 @@ from collections import deque
 from threading import Thread
 from typing import Tuple
 
-import discord 
-from discord import app_commands, Intents # <--- ここを変更しました！ Intents を追加
+import discord # <--- この行だけ残します
 
 # from dotenv import load_dotenv # <-- この行は削除されたままです
 from flask import Flask
@@ -115,10 +114,10 @@ def get_response_limits(text: str) -> Tuple[int, int]:
     return (200, 200) # 通常は最大200文字、200トークン
 
 # --- Discord Bot定義と初期化 ---
-intents = Intents.default() # <--- Intents を直接使います
+intents = discord.Intents.default() # <--- discord. を付けました
 intents.message_content = True # メッセージ内容の読み取りを有効化
 bot = discord.Client(intents=intents)
-tree = app_commands.CommandTree(bot)
+tree = discord.app_commands.CommandTree(bot) # <--- discord. を付けました
 
 # --- 共通の応答生成ロジック ---
 async def generate_bot_response(user_display_name: str, message_content: str) -> str:
@@ -200,7 +199,7 @@ async def on_ready():
 
 # /xhiqi スラッシュコマンドの定義
 @tree.command(name="xhiqi", description="xhiqi とお話しする")
-@app_commands.describe(message="話しかけたい内容")
+@discord.app_commands.describe(message="話しかけたい内容") # <--- discord. を付けました
 async def xhiqi_command(interaction: discord.Interaction, message: str):
     await interaction.response.defer(thinking=True) # Botが考えていることを表示
     reply_text = await generate_bot_response(interaction.user.display_name, message)
