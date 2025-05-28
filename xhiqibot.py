@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 from flask import Flask
-from openai import APIError # <-- この行をここに追加し、OpenAIエラーの基底クラスをインポート
+from openai import APIError # <-- この行はそのまま
 
 # --- .env 読み込みと必須環境変数チェック ---
 load_dotenv()
@@ -209,20 +209,20 @@ def home():
     return "Xhiqibot's web server is running and healthy.", 200
 
 # --- メイン実行ブロック ---
-if __name__ == "__main__":
-    # Discord Botを別スレッドで起動
-    # Cloud RunがメインプロセスにHTTPポートのリッスンを期待するため、
-    # Flaskサーバーをメインプロセスで起動し、Botはサブスレッドで動かす。
-    print("メインスレッド: Discord Botを別スレッドで起動します...")
-    discord_thread = Thread(target=bot.run, args=(DISCORD_TOKEN,))
-    discord_thread.start()
+# ここが削除されました。
+# DockerfileのCMDでGunicornが直接xhiqibot:appをロードします。
+# Discord Botは、Gunicornのワーカープロセス内で別スレッドとして起動します。
+# Botの起動コードは、gunicornがxhiqibot.pyをインポートする際に実行されます。
+# Pythonスクリプトが直接実行される (python xhiqibot.py) 場合のみ
+# if __name__ == "__main__": が実行されますが、DockerfileのCMDでは
+# モジュールとしてインポートされるため、このブロックは不要になります。
 
-    # FlaskアプリをGunicornで実行
-    # Cloud Runは環境変数PORTを設定するので、それを取得して使用
-    port = int(os.environ.get("PORT", 8080))
-    print(f"メインスレッド: Flask WebサーバーをGunicornでポート {port} にて起動します...")
-    # ファイル名が 'xhiqibot.py' なので、'xhiqibot:app' と指定
-    os.system(f"gunicorn --bind 0.0.0.0:{port} --workers 1 xhiqibot:app")
-
-    # os.system はブロックするため、ここより下のコードは実行されません。
-    # GunicornがFlaskサーバーのプロセスを管理し、このプロセスはCloud Runのコンテナ内で実行され続けます。
+# Botの起動をメインの実行フロー（Gunicornの起動とは別）に含める
+# xhiqibot.pyがインポートされたときに実行されるようにします。
+# ただし、Gunicornが複数のワーカーを起動する場合、Botもワーカーごとに起動される可能性があります。
+# このままで一旦動かしてみて、もしBotが重複して起動するようであれば、
+# Botの起動ロジックをFlaskの初回リクエスト時や、特定のシグナル受信時に変更する必要があります。
+# しかし、--workers 1 を指定しているので、一旦はこのままで良いはずです。
+print("Discord Botを別スレッドで起動します...")
+discord_thread = Thread(target=bot.run, args=(DISCORD_TOKEN,))
+discord_thread.start()
