@@ -7,12 +7,12 @@ from collections import deque
 from threading import Thread
 from typing import Tuple
 
-# from dotenv import load_dotenv # <-- この行を削除しました
+# from dotenv import load_dotenv # <-- この行は削除されたままです
 from flask import Flask
 from openai import APIError
 
 # --- .env 読み込みと必須環境変数チェック ---
-# load_dotenv() # <-- この呼び出しを削除しました
+# load_dotenv() # <-- この呼び出しは削除されたままです
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -25,10 +25,40 @@ GUILD_ID_RAW = os.getenv("GUILD_ID") # 特定のギルドにスラッシュコ�
 #     print("エラー: DISCORD_TOKEN および OPENAI_API_KEY を .env ファイルに設定してください。", file=sys.stderr)
 #     sys.exit(1) # 環境変数がなければプログラムを終了
 
+# --- デバッグ用追加コード (ここから) ---
+print("--- 環境変数デバッグ情報 ---", file=sys.stderr)
+if DISCORD_TOKEN is None:
+    print("デバッグ: DISCORD_TOKEN が None です。", file=sys.stderr)
+else:
+    print(f"デバッグ: DISCORD_TOKEN の長さ: {len(DISCORD_TOKEN)}", file=sys.stderr)
+    print(f"デバッグ: DISCORD_TOKEN の先頭5文字: {DISCORD_TOKEN[:5]}", file=sys.stderr)
+    # print(f"デバッグ: DISCORD_TOKEN の末尾5文字: {DISCORD_TOKEN[-5:]}", file=sys.stderr) # セキュリティのため末尾は出力しない
+
+if OPENAI_API_KEY is None:
+    print("デバッグ: OPENAI_API_KEY が None です。", file=sys.stderr)
+else:
+    print(f"デバッグ: OPENAI_API_KEY の長さ: {len(OPENAI_API_KEY)}", file=sys.stderr)
+    print(f"デバッグ: OPENAI_API_KEY の先頭5文字: {OPENAI_API_KEY[:5]}", file=sys.stderr)
+    # print(f"デバッグ: OPENAI_API_KEY の末尾5文字: {OPENAI_API_KEY[-5:]}", file=sys.stderr) # セキュリティのため末尾は出力しない
+
+if OPENAI_PROJECT_ID is None:
+    print("デバッグ: OPENAI_PROJECT_ID が None です。", file=sys.stderr)
+else:
+    print(f"デバッグ: OPENAI_PROJECT_ID の値: {OPENAI_PROJECT_ID}", file=sys.stderr)
+
+if GUILD_ID_RAW is None:
+    print("デバッグ: GUILD_ID_RAW が None です。", file=sys.stderr)
+else:
+    print(f"デバッグ: GUILD_ID_RAW の値: {GUILD_ID_RAW}", file=sys.stderr)
+print("--- 環境変数デバッグ情報ここまで ---", file=sys.stderr)
+# --- デバッグ用追加コード (ここまで) ---
+
+
 # --- OpenAI SDK 初期化とAPI呼び出し関数 ---
 try:
     # OpenAI SDK v1.x の場合
     from openai import OpenAI
+    # ここで OPENAI_API_KEY が None だとエラーになる可能性が高い
     openai_client = OpenAI(api_key=OPENAI_API_KEY, project=OPENAI_PROJECT_ID)
     OpenAIException = APIError # エラーハンドリング用の基底クラスとしてAPIErrorを使用
 
@@ -116,13 +146,13 @@ async def generate_bot_response(user_display_name: str, message_content: str) ->
     try:
         # プライマリモデルで応答を試行
         reply_content = await complete_openai_call(PRIMARY_MODEL, messages_for_api, max_tokens)
-    except OpenAIException as e:
+    except APIError as e: # ImportError ではなく APIError を直接キャッチ
         print(f"Primary model ({PRIMARY_MODEL}) API error: {e}", file=sys.stderr)
         try:
             # プライマリモデルが失敗した場合、フォールバックモデルを試行
             reply_content = await complete_openai_call(FALLBACK_MODEL, messages_for_api, max_tokens)
             print(f"Successfully used fallback model ({FALLBACK_MODEL}).")
-        except OpenAIException as e_fallback:
+        except APIError as e_fallback: # ImportError ではなく APIError を直接キャッチ
             print(f"Fallback model ({FALLBACK_MODEL}) API error: {e_fallback}", file=sys.stderr)
             return "APIエラーが発生しました。しばらくしてからもう一度お試しください。"
 
@@ -141,7 +171,7 @@ async def generate_bot_response(user_display_name: str, message_content: str) ->
                 max_tokens=100,
             )
             reply_content += f"\n\n（ところで、{crab_thought.strip()}）"
-        except OpenAIException as e_crab:
+        except APIError as e_crab: # ImportError ではなく APIError を直接キャッチ
             print(f"Crab thought generation error: {e_crab}", file=sys.stderr)
             # カニの思考でエラーが出ても、メインの返信はそのまま続行
 
