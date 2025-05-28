@@ -7,8 +7,8 @@ from collections import deque
 from threading import Thread
 from typing import Tuple
 
-import discord # <--- この行を追加しました！
-from discord import app_commands # <--- この行も追加しました！ (app_commands を使うため)
+import discord 
+from discord import app_commands, Intents # <--- ここを変更しました！ Intents を追加
 
 # from dotenv import load_dotenv # <-- この行は削除されたままです
 from flask import Flask
@@ -115,7 +115,7 @@ def get_response_limits(text: str) -> Tuple[int, int]:
     return (200, 200) # 通常は最大200文字、200トークン
 
 # --- Discord Bot定義と初期化 ---
-intents = discord.Intents.default()
+intents = Intents.default() # <--- Intents を直接使います
 intents.message_content = True # メッセージ内容の読み取りを有効化
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
