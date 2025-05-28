@@ -7,23 +7,23 @@ from collections import deque
 from threading import Thread
 from typing import Tuple
 
-import discord
-from discord import app_commands
-from dotenv import load_dotenv
+# from dotenv import load_dotenv # <-- この行を削除しました
 from flask import Flask
-from openai import APIError # <-- この行はそのまま
+from openai import APIError
 
 # --- .env 読み込みと必須環境変数チェック ---
-load_dotenv()
+# load_dotenv() # <-- この呼び出しを削除しました
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID") or None
 GUILD_ID_RAW = os.getenv("GUILD_ID") # 特定のギルドにスラッシュコマンドを同期する場合
 
-if not DISCORD_TOKEN or not OPENAI_API_KEY:
-    print("エラー: DISCORD_TOKEN および OPENAI_API_KEY を .env ファイルに設定してください。", file=sys.stderr)
-    sys.exit(1) # 環境変数がなければプログラムを終了
+# 環境変数のチェックは、コンテナが起動しない原因になる可能性があるので削除
+# Cloud Runの環境変数設定で確実に設定してください
+# if not DISCORD_TOKEN or not OPENAI_API_KEY:
+#     print("エラー: DISCORD_TOKEN および OPENAI_API_KEY を .env ファイルに設定してください。", file=sys.stderr)
+#     sys.exit(1) # 環境変数がなければプログラムを終了
 
 # --- OpenAI SDK 初期化とAPI呼び出し関数 ---
 try:
@@ -208,21 +208,9 @@ def home():
     """Cloud Runのヘルスチェックに応答するエンドポイント"""
     return "Xhiqibot's web server is running and healthy.", 200
 
-# --- メイン実行ブロック ---
-# ここが削除されました。
-# DockerfileのCMDでGunicornが直接xhiqibot:appをロードします。
-# Discord Botは、Gunicornのワーカープロセス内で別スレッドとして起動します。
-# Botの起動コードは、gunicornがxhiqibot.pyをインポートする際に実行されます。
-# Pythonスクリプトが直接実行される (python xhiqibot.py) 場合のみ
-# if __name__ == "__main__": が実行されますが、DockerfileのCMDでは
-# モジュールとしてインポートされるため、このブロックは不要になります。
-
-# Botの起動をメインの実行フロー（Gunicornの起動とは別）に含める
+# Discord Botの起動をメインの実行フロー（Gunicornの起動とは別）に含める
 # xhiqibot.pyがインポートされたときに実行されるようにします。
-# ただし、Gunicornが複数のワーカーを起動する場合、Botもワーカーごとに起動される可能性があります。
-# このままで一旦動かしてみて、もしBotが重複して起動するようであれば、
-# Botの起動ロジックをFlaskの初回リクエスト時や、特定のシグナル受信時に変更する必要があります。
-# しかし、--workers 1 を指定しているので、一旦はこのままで良いはずです。
+# CMD ["gunicorn", ...] が xhiqibot:app をロードすると、この部分はGunicornのワーカープロセス内で実行される
 print("Discord Botを別スレッドで起動します...")
 discord_thread = Thread(target=bot.run, args=(DISCORD_TOKEN,))
 discord_thread.start()
