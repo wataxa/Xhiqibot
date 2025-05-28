@@ -7,6 +7,9 @@ from collections import deque
 from threading import Thread
 from typing import Tuple
 
+import discord # <--- この行を追加しました！
+from discord import app_commands # <--- この行も追加しました！ (app_commands を使うため)
+
 # from dotenv import load_dotenv # <-- この行は削除されたままです
 from flask import Flask
 from openai import APIError
@@ -58,7 +61,6 @@ print("--- 環境変数デバッグ情報ここまで ---", file=sys.stderr)
 try:
     # OpenAI SDK v1.x の場合
     from openai import OpenAI
-    # ここで OPENAI_API_KEY が None だとエラーになる可能性が高い
     openai_client = OpenAI(api_key=OPENAI_API_KEY, project=OPENAI_PROJECT_ID)
     OpenAIException = APIError # エラーハンドリング用の基底クラスとしてAPIErrorを使用
 
