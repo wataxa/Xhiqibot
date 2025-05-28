@@ -1,19 +1,26 @@
-# Pythonの公式スリムイメージをベースにする
+# Pythonの公式イメージを使用
 FROM python:3.10-slim-buster
 
-# コンテナ内の作業ディレクトリを設定
+# ワーキングディレクトリを設定
 WORKDIR /app
 
-# 必要なライブラリを直接インストール
-# --no-cache-dir はキャッシュを使わないことで、ビルド失敗時の再試行をクリーンにする
-# gunicorn と discord.py は互いに依存関係が複雑な場合があるので、先にインストール
-RUN pip install --no-cache-dir gunicorn discord.py==2.4.0 openai python-dotenv Flask httpx
+# 依存関係をインストール
+# discord.py と openai を直接指定し、aiohttp も追加
+# Cloud Runの推奨事項に従い、システムの依存関係は極力減らす
+RUN pip install --no-cache-dir \
+    discord.py \
+    openai \
+    gunicorn \
+    flask \
+    aiohttp  # <--- この行を追加しました！
 
-# アプリケーションのコードをコピー
+# アプリケーションのコードをコンテナにコピー
 COPY . .
 
-# Cloud Runがリッスンするポートを定義
+# アプリケーションがリッスンするポートを定義
 ENV PORT 8080
 
-# コンテナ起動時に実行するコマンド
-CMD ["gunicorn", "--bind", "0.0.0.0:${PORT}", "--workers", "1", "xhiqibot:app"]
+# Gunicornを使ってFlaskアプリとDiscord Botを起動
+# gunicorn は xhiqibot.py 内の `app` オブジェクトをWSGIアプリケーションとして起動する
+# その後、xhiqibot.py の中で Discord Bot を別スレッドで起動する
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 xhiqibot:app
