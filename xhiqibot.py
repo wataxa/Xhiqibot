@@ -12,44 +12,46 @@ from discord import app_commands
 from dotenv import load_dotenv
 from flask import Flask
 
-# --- .env 読み込み ---
+# --- .env 読み込みと必須環境変数チェック ---
 load_dotenv()
 
-# 必須環境変数のチェック
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID") or None
+GUILD_ID_RAW = os.getenv("GUILD_ID") # 特定のギルドにスラッシュコマンドを同期する場合
+
 if not DISCORD_TOKEN or not OPENAI_API_KEY:
     print("エラー: DISCORD_TOKEN および OPENAI_API_KEY を .env ファイルに設定してください。", file=sys.stderr)
-    sys.exit(1) # プログラムを終了させる
+    sys.exit(1) # 環境変数がなければプログラムを終了
 
-OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID") or None
-GUILD_ID_RAW = os.getenv("GUILD_ID") # 特定のギルドに同期する場合
-
-# --- OpenAI SDK 初期化 ---
+# --- OpenAI SDK 初期化とAPI呼び出し関数 ---
 try:
-    from openai import OpenAI
-    # SDK v1.x の書き方
+    # OpenAI SDK v1.x の場合
+    from openai import OpenAI, APIError # APIErrorをインポート
     openai_client = OpenAI(api_key=OPENAI_API_KEY, project=OPENAI_PROJECT_ID)
-    OpenAIError = Exception # v1.xではopenai.OpenAIErrorが基底クラスではないので汎用的なExceptionに
-                            # より厳密には openai.APIStatusError などを使う
+    OpenAIException = APIError # エラーハンドリング用の基底クラスとしてAPIErrorを使用
 
-    async def complete(model: str, messages: list, max_tokens: int) -> str:
-        resp = await asyncio.to_thread(
-            openai_client.chat.completions.create, # 同期メソッドを非同期で実行
+    async def complete_openai_call(model: str, messages: list, max_tokens: int) -> str:
+        """OpenAI API (v1.x) を非同期で呼び出す"""
+        resp = await asyncio.to_thread( # 同期メソッドを別スレッドで非同期実行
+            openai_client.chat.completions.create,
             model=model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=0.7,
         )
         return resp.choices[0].message.content.strip()
+    print("[OpenAI SDK] v1.x detected.")
+
 except ImportError:
-    # v0.x 系のフォールバック (もし存在すれば)
+    # 古い OpenAI SDK v0.x の場合 (フォールバック)
     import openai # type: ignore
     openai.api_key = OPENAI_API_KEY
-    # openai.project = OPENAI_PROJECT_ID # v0.xでのproject指定はサポートされていない可能性あり
-    OpenAIError = openai.error.OpenAIError # type: ignore
+    # openai.project = OPENAI_PROJECT_ID # v0.xではproject指定はサポートされていない可能性あり
+    OpenAIException = openai.error.OpenAIError # type: ignore
 
-    async def complete(model: str, messages: list, max_tokens: int) -> str:
+    async def complete_openai_call(model: str, messages: list, max_tokens: int) -> str:
+        """OpenAI API (v0.x) を非同期で呼び出す"""
         loop = asyncio.get_running_loop()
         resp = await loop.run_in_executor(
             None,
@@ -61,7 +63,7 @@ except ImportError:
             ),
         )
         return resp["choices"][0]["message"]["content"].strip()
-print(f"[OpenAI SDK] {('v1.x' if 'openai_client' in locals() else 'v0.x')} detected")
+    print("[OpenAI SDK] v0.x detected (fallback).")
 
 
 # --- モデル指定 ---
@@ -70,27 +72,27 @@ FALLBACK_MODEL = "gpt-3.5-turbo"
 
 # --- 会話履歴保持 ---
 # messagesのロールは "user", "assistant", "system"
-# 名前は "name" フィールドで指定 (role="user"のみ)
-history = deque(maxlen=20)
+# "name" フィールドは role="user" のみ
+history = deque(maxlen=20) # 最新20件の会話を保持
 
-def get_limits(text: str) -> Tuple[int, int]:
+def get_response_limits(text: str) -> Tuple[int, int]:
     """メッセージ内容に応じて返答の文字数と最大トークン数を設定"""
     if "レイシオ" in text:
         return (2000, 1500) # レイシオの場合、最大2000文字、1500トークン
     return (200, 200) # 通常は最大200文字、200トークン
 
-# --- Bot定義と初期化 ---
+# --- Discord Bot定義と初期化 ---
 intents = discord.Intents.default()
-intents.message_content = True # メッセージの内容を読み取るためのインテント
+intents.message_content = True # メッセージ内容の読み取りを有効化
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
-# --- 共通の応答生成関数 ---
-async def generate_response(user_display_name: str, message_content: str) -> str:
+# --- 共通の応答生成ロジック ---
+async def generate_bot_response(user_display_name: str, message_content: str) -> str:
     """
-    OpenAI APIを呼び出して応答を生成する
+    OpenAI APIを呼び出して、Discord Botの応答を生成する
     """
-    char_limit, max_tokens = get_limits(message_content)
+    char_limit, max_tokens = get_response_limits(message_content)
 
     system_prompt = (
         "あなたの名前はしき（xhiqi）。"
@@ -109,26 +111,27 @@ async def generate_response(user_display_name: str, message_content: str) -> str
     # APIに送るメッセージリストを構築 (システムプロンプト + 履歴)
     messages_for_api = [{"role": "system", "content": system_prompt}] + list(history)
 
+    reply_content = ""
     try:
         # プライマリモデルで応答を試行
-        reply = await complete(PRIMARY_MODEL, messages_for_api, max_tokens)
-    except OpenAIError as e:
-        print(f"Primary model ({PRIMARY_MODEL}) error: {e}", file=sys.stderr)
+        reply_content = await complete_openai_call(PRIMARY_MODEL, messages_for_api, max_tokens)
+    except OpenAIException as e:
+        print(f"Primary model ({PRIMARY_MODEL}) API error: {e}", file=sys.stderr)
         try:
             # プライマリモデルが失敗した場合、フォールバックモデルを試行
-            reply = await complete(FALLBACK_MODEL, messages_for_api, max_tokens)
+            reply_content = await complete_openai_call(FALLBACK_MODEL, messages_for_api, max_tokens)
             print(f"Successfully used fallback model ({FALLBACK_MODEL}).")
-        except OpenAIError as e_fallback:
-            print(f"Fallback model ({FALLBACK_MODEL}) error: {e_fallback}", file=sys.stderr)
+        except OpenAIException as e_fallback:
+            print(f"Fallback model ({FALLBACK_MODEL}) API error: {e_fallback}", file=sys.stderr)
             return "APIエラーが発生しました。しばらくしてからもう一度お試しください。"
 
     # AIの返答を履歴に追加
-    history.append({"role": "assistant", "content": reply})
+    history.append({"role": "assistant", "content": reply_content})
 
-    # 低確率でカニに関する思考を追加
+    # 低確率でカニに関する思考を追加 (「レイシオ」を含まない場合のみ)
     if "レイシオ" not in message_content and random.random() < 0.15:
         try:
-            crab_thought = await complete(
+            crab_thought = await complete_openai_call(
                 PRIMARY_MODEL, # カニ思考もメインモデルで
                 [
                     {"role": "system", "content": "あなたは時々カニを想います。100字以内で書いてください。"},
@@ -136,65 +139,65 @@ async def generate_response(user_display_name: str, message_content: str) -> str
                 ],
                 max_tokens=100,
             )
-            reply += f"\n\n（ところで、{crab_thought.strip()}）"
-        except OpenAIError as e_crab:
+            reply_content += f"\n\n（ところで、{crab_thought.strip()}）"
+        except OpenAIException as e_crab:
             print(f"Crab thought generation error: {e_crab}", file=sys.stderr)
             # カニの思考でエラーが出ても、メインの返信はそのまま続行
 
-    return reply
+    return reply_content
 
-# --- Discord Botイベントとコマンド ---
+# --- Discord Botイベントリスナーとコマンド ---
 
 # Botがオンラインになった時の処理
 @bot.event
 async def on_ready():
-    print(f"XhiqiBot starting… Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"XhiqiBot successfully logged in as {bot.user} (ID: {bot.user.id})")
     try:
         if GUILD_ID_RAW:
             # 特定のギルドにスラッシュコマンドを同期
             guild = discord.Object(id=int(GUILD_ID_RAW))
-            synced = await tree.sync(guild=guild)
-            print(f"Slash コマンドをギルドに同期しました ({len(synced)} commands)")
+            synced_commands = await tree.sync(guild=guild)
+            print(f"Slash コマンドをギルドに同期しました ({len(synced_commands)} コマンド)")
         else:
             # 全てのギルドにスラッシュコマンドを同期 (最大1時間かかる場合あり)
-            synced = await tree.sync()
-            print(f"Slash コマンドを全体に同期しました ({len(synced)} commands, 最大 1h)")
+            synced_commands = await tree.sync()
+            print(f"Slash コマンドを全体に同期しました ({len(synced_commands)} コマンド, 最大 1h)")
     except Exception as e:
-        print(f"Sync error: {e}", file=sys.stderr)
+        print(f"Slash コマンド同期エラー: {e}", file=sys.stderr)
 
-# /xhiqi スラッシュコマンド
+# /xhiqi スラッシュコマンドの定義
 @tree.command(name="xhiqi", description="xhiqi とお話しする")
 @app_commands.describe(message="話しかけたい内容")
-async def xhiqi(interaction: discord.Interaction, message: str):
+async def xhiqi_command(interaction: discord.Interaction, message: str):
     await interaction.response.defer(thinking=True) # Botが考えていることを表示
-    reply = await generate_response(interaction.user.display_name, message)
+    reply_text = await generate_bot_response(interaction.user.display_name, message)
     await interaction.followup.send(
-        f"**{interaction.user.display_name}：** {message}\n**xhiqi：** {reply}")
+        f"**{interaction.user.display_name}：** {message}\n**xhiqi：** {reply_text}")
 
 # メンションに対する応答
 @bot.event
-async def on_message(msg: discord.Message):
-    if msg.author.bot: # Bot自身のメッセージは無視
+async def on_message(message: discord.Message):
+    if message.author.bot: # Bot自身のメッセージは無視
         return
 
     # Botへのメンションが含まれているか確認
-    if bot.user and bot.user.mentioned_in(msg):
-        # メンション部分をメッセージから削除して、純粋なメッセージ内容を取得
-        # `@BotName メッセージ` => `メッセージ`
+    if bot.user and bot.user.mentioned_in(message):
+        # メンション部分を削除して、純粋なメッセージ内容を取得
+        # 例: `@BotName メッセージ` -> `メッセージ`
         # 返信 (Reply) の場合は、返信元のメッセージを取得
-        message_content = msg.content.replace(f'<@!{bot.user.id}>', '').strip()
-        if msg.reference and isinstance(msg.reference.resolved, discord.Message):
+        clean_message_content = message.content.replace(f'<@!{bot.user.id}>', '').strip()
+        if message.reference and isinstance(message.reference.resolved, discord.Message):
             # 返信の場合は、返信元のメッセージ内容を優先
-            message_content = msg.reference.resolved.content
+            clean_message_content = message.reference.resolved.content
         
-        if not message_content: # メッセージ内容が空なら処理しない
+        if not clean_message_content: # メッセージ内容が空なら処理しない
             return
 
-        async with msg.channel.typing(): # Botが入力中...と表示
-            reply = await generate_response(msg.author.display_name, message_content)
+        async with message.channel.typing(): # Botが「入力中...」と表示
+            reply_text = await generate_bot_response(message.author.display_name, clean_message_content)
         
         # 返信元にリプライする形式でメッセージを送信
-        await msg.channel.send(f"**xhiqi：** {reply}", reference=msg.reference)
+        await message.channel.send(f"**xhiqi：** {reply_text}", reference=message.reference)
 
 # --- Flask Webサーバーの設定 (Cloud Runのヘルスチェック用) ---
 app = Flask(__name__)
@@ -202,23 +205,23 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     """Cloud Runのヘルスチェックに応答するエンドポイント"""
-    return "Xhiqibot's web server is running.", 200
+    return "Xhiqibot's web server is running and healthy.", 200
 
 # --- メイン実行ブロック ---
 if __name__ == "__main__":
     # Discord Botを別スレッドで起動
     # Cloud RunがメインプロセスにHTTPポートのリッスンを期待するため、
     # Flaskサーバーをメインプロセスで起動し、Botはサブスレッドで動かす。
-    print("Starting Discord Bot in a separate thread...")
+    print("メインスレッド: Discord Botを別スレッドで起動します...")
     discord_thread = Thread(target=bot.run, args=(DISCORD_TOKEN,))
     discord_thread.start()
 
     # FlaskアプリをGunicornで実行
     # Cloud Runは環境変数PORTを設定するので、それを取得して使用
     port = int(os.environ.get("PORT", 8080))
-    print(f"Starting Flask web server with Gunicorn on port {port}...")
-    # ファイル名が 'xhiqi.py' なので、'xhiqi:app' と指定
-    os.system(f"gunicorn --bind 0.0.0.0:{port} --workers 1 xhiqi:app")
+    print(f"メインスレッド: Flask WebサーバーをGunicornでポート {port} にて起動します...")
+    # ファイル名が 'xhiqibot.py' なので、'xhiqibot:app' と指定
+    os.system(f"gunicorn --bind 0.0.0.0:{port} --workers 1 xhiqibot:app")
 
-    # 注意: os.system はブロックするため、ここより下のコードは実行されません。
-    # 実際には、GunicornがFlaskサーバーのプロセスを管理し、このプロセスはCloud Runのコンテナ内で実行され続けます。
+    # os.system はブロックするため、ここより下のコードは実行されません。
+    # GunicornがFlaskサーバーのプロセスを管理し、このプロセスはCloud Runのコンテナ内で実行され続けます。
