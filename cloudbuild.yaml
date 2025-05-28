@@ -1,0 +1,7 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'gcr.io/$PROJECT_ID/xhiqibot-image', '.'] # イメージ名をサービス名に合わせる
+images:
+- 'gcr.io/$PROJECT_ID/xhiqibot-image' # イメージ名をサービス名に合わせる
+options:
+  diskSizeGb: '200' # <-- ここでディスクサイズを200GBに増やします (デフォルトは100GB)
