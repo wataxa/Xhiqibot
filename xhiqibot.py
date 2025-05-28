@@ -40,7 +40,9 @@ openai_client = OpenAI(
 )
 
 # Discord Botの初期化
-intents = discord.Intents.default()
+# ★★★ ここを discord.Intents.all() に変更しました ★★★
+intents = discord.Intents.all()
+
 # MESSAGE CONTENT INTENT を有効にする
 # Discord Developer Portalでも有効にする必要がある点に注意
 intents.message_content = True
@@ -150,11 +152,6 @@ async def xhiqi_command(interaction: discord.Interaction, message: str):
         print(f"OpenAI API error (slash command): {e}")
         await interaction.followup.send("AIとの通信中にエラーが発生しました。申し訳ありません。")
 
-# Discord Botの実行プロセス
-def run_discord_bot():
-    print("Discord Botプロセスを開始します...")
-    bot.run(DISCORD_TOKEN)
-
 # Flaskルートハンドラ
 @app.route('/')
 def home():
@@ -164,6 +161,11 @@ def home():
 @app.route('/_ah/health')
 def health_check():
     return jsonify({"status": "ok"})
+
+# Discord Botの実行プロセス
+def run_discord_bot():
+    print("Discord Botプロセスを開始します...")
+    bot.run(DISCORD_TOKEN)
 
 # メイン実行ブロック
 if __name__ == '__main__':
