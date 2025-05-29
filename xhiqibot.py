@@ -40,18 +40,13 @@ openai_client = OpenAI(
 )
 
 # Discord Botの初期化
-# ★★★ ここを discord.Intents.all() に変更しました ★★★
 intents = discord.Intents.all()
-
-# MESSAGE CONTENT INTENT を有効にする
-# Discord Developer Portalでも有効にする必要がある点に注意
 intents.message_content = True
 
 # botオブジェクトの初期化
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # グローバルスコープまたはギルドスコープのいずれかでスラッシュコマンドを同期するためのGUILD_ID
-# GUILD_IDが設定されていればギルドコマンドとして同期、そうでなければグローバルコマンドとして同期
 GUILD_ID = discord.Object(id=int(os.environ.get('GUILD_ID'))) if os.environ.get('GUILD_ID') else None
 
 # ペルソナ設定をファイルから読み込む
@@ -71,7 +66,6 @@ async def on_ready():
     try:
         if GUILD_ID:
             # 特定のギルドにスラッシュコマンドを同期
-            # print(f"デバッグ: GUILD_ID を使ってギルドコマンドを同期します: {GUILD_ID.id}")
             bot.tree.copy_global_to(guild=GUILD_ID)
             await bot.tree.sync(guild=GUILD_ID)
             print(f"Slash コマンドをギルドに同期しました (1 コマンド)")
@@ -79,6 +73,12 @@ async def on_ready():
             # グローバルにスラッシュコマンドを同期
             await bot.tree.sync()
             print("Slash コマンドを全体に同期しました (1 コマンド, 最大 1h)")
+
+        # ★★★ ここに常に🕯️だけのステータスを設定 ★★★
+        await bot.change_presence(activity=discord.Game(name="🕯️"))
+        print(f"Botのステータスを「🕯️」に設定しました。")
+        # ★★★ ここまでステータス設定 ★★★
+
     except Exception as e:
         if GUILD_ID:
             print(f"Slash コマンド同期エラー (ギルドID: {GUILD_ID.id}): {e}")
@@ -89,28 +89,20 @@ async def on_ready():
 # メッセージを受信した時のイベント
 @bot.event
 async def on_message(message):
-    # --- ここからデバッグ用の新しい行を追加 ---
-    # Botが受信するすべてのメッセージをログに出力します。
     print(f"DEBUG: Received ANY message from {message.author} in channel {message.channel.name}: {message.content}")
 
-    # もしBotがメッセージの送信者だった場合は処理をスキップ
     if message.author.bot:
         print(f"DEBUG: Message author is a bot, skipping.")
         return
-    # --- ここまでデバッグ用の新しい行を追加 ---
 
-    # Botがメンションされているかどうかのチェック
     if bot.user.mentioned_in(message):
         print(f"DEBUG: Bot was mentioned in message: {message.content}")
-        # メッセージ内容からBotのメンション部分を除去
         clean_message_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
 
-        # もしメンション後のメッセージが空なら何もしない
         if not clean_message_content:
             await message.channel.send("何か質問がありますか？")
             return
 
-        # AIに問い合わせる
         try:
             response = openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -128,13 +120,12 @@ async def on_message(message):
             print(f"OpenAI API error: {e}")
             await message.channel.send("AIとの通信中にエラーが発生しました。申し訳ありません。")
     else:
-        # メンションではない、かつスラッシュコマンドでもないメッセージの場合（これもログに出してみる）
         print(f"DEBUG: Message not a direct mention or slash command: {message.content}")
 
 # スラッシュコマンド
 @bot.tree.command(name="xhiqi", description="AIに質問します", guild=GUILD_ID)
 async def xhiqi_command(interaction: discord.Interaction, message: str):
-    await interaction.response.defer() # コマンドの応答が遅れることをDiscordに伝える
+    await interaction.response.defer()
     try:
         response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -169,11 +160,5 @@ def run_discord_bot():
 
 # メイン実行ブロック
 if __name__ == '__main__':
-    # Discord Botを別プロセスで起動
     discord_process = Process(target=run_discord_bot)
     discord_process.start()
-
-    # Flaskサーバーを起動
-    # Gunicornがこれを呼び出すので、通常はGunicornの起動コマンドのみで十分
-    # ローカルで実行する場合は以下のコメントを解除
-    # app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080))
